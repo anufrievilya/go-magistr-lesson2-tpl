@@ -98,10 +98,25 @@ func (v *validator) run(root *yaml.Node) {
 	}
 
 	// spec
-	if x, ok := m["spec"]; !ok {
+	specNode, hasSpec := m["spec"]
+	if !hasSpec {
 		v.err(0, "spec is required")
 	} else {
-		v.spec(x)
+		v.spec(specNode)
+	}
+
+	// ВАЖНО: containers может быть на верхнем уровне (неправильный YAML)
+	// Валидируем их в любом случае
+	if x, ok := m["containers"]; ok {
+		for _, c := range x.Content {
+			v.container(c)
+		}
+	} else if hasSpec {
+		// Проверяем что containers есть внутри spec
+		specMap := v.m(specNode)
+		if _, ok := specMap["containers"]; !ok {
+			v.err(0, "spec.containers is required")
+		}
 	}
 }
 
@@ -110,7 +125,7 @@ func (v *validator) meta(n *yaml.Node) {
 	if x, ok := m["name"]; !ok {
 		v.err(0, "metadata.name is required")
 	} else if strings.TrimSpace(x.Value) == "" {
-		v.err(x.Line, "metadata.name is required")
+		v.err(x.Line, "name is required")
 	}
 }
 
@@ -123,9 +138,7 @@ func (v *validator) spec(n *yaml.Node) {
 	}
 
 	// containers
-	if x, ok := m["containers"]; !ok {
-		v.err(0, "spec.containers is required")
-	} else {
+	if x, ok := m["containers"]; ok {
 		for _, c := range x.Content {
 			v.container(c)
 		}
@@ -135,7 +148,7 @@ func (v *validator) spec(n *yaml.Node) {
 func (v *validator) container(n *yaml.Node) {
 	m := v.m(n)
 
-	// name  this works
+	// name
 	if x, ok := m["name"]; !ok {
 		v.err(0, "containers.name is required")
 	} else if strings.TrimSpace(x.Value) == "" {
@@ -222,9 +235,8 @@ func (v *validator) resources(n *yaml.Node) {
 func (v *validator) reslist(n *yaml.Node) {
 	m := v.m(n)
 
-	// cpu - ВАЖНО: строка "1" должна давать ошибку!
+	// cpu
 	if x, ok := m["cpu"]; ok {
-		// Если yaml парсер определил это как строку (!!str), это ошибка
 		if x.Tag == "!!str" {
 			v.err(x.Line, "cpu must be int")
 		} else if _, e := strconv.Atoi(x.Value); e != nil {
