@@ -10,242 +10,460 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Структуры для валидации
+type Pod struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   ObjectMeta        `yaml:"metadata"`
+	Spec       PodSpec           `yaml:"spec"`
+	Errors     []ValidationError `yaml:"-"`
+}
+
+type ObjectMeta struct {
+	Name      string            `yaml:"name"`
+	Namespace string            `yaml:"namespace"`
+	Labels    map[string]string `yaml:"labels"`
+	Line      int               `yaml:"-"`
+}
+
+type PodSpec struct {
+	OS         *PodOS      `yaml:"os"`
+	Containers []Container `yaml:"containers"`
+	Line       int         `yaml:"-"`
+}
+
+type PodOS struct {
+	Name string `yaml:"name"`
+	Line int    `yaml:"-"`
+}
+
+type Container struct {
+	Name           string               `yaml:"name"`
+	Image          string               `yaml:"image"`
+	Ports          []ContainerPort      `yaml:"ports"`
+	ReadinessProbe *Probe               `yaml:"readinessProbe"`
+	LivenessProbe  *Probe               `yaml:"livenessProbe"`
+	Resources      ResourceRequirements `yaml:"resources"`
+	Line           int                  `yaml:"-"`
+}
+
+type ContainerPort struct {
+	ContainerPort int    `yaml:"containerPort"`
+	Protocol      string `yaml:"protocol"`
+	Line          int    `yaml:"-"`
+}
+
+type Probe struct {
+	HTTPGet HTTPGetAction `yaml:"httpGet"`
+	Line    int           `yaml:"-"`
+}
+
+type HTTPGetAction struct {
+	Path string `yaml:"path"`
+	Port int    `yaml:"port"`
+	Line int    `yaml:"-"`
+}
+
+type ResourceRequirements struct {
+	Limits   ResourceList `yaml:"limits"`
+	Requests ResourceList `yaml:"requests"`
+	Line     int          `yaml:"-"`
+}
+
+type ResourceList struct {
+	CPU    interface{} `yaml:"cpu"`
+	Memory string      `yaml:"memory"`
+	Line   int         `yaml:"-"`
+}
+
+type ValidationError struct {
+	Filename string
+	Line     int
+	Message  string
+}
+
+// Константы для валидации
+const (
+	validAPIVersion  = "v1"
+	validKind        = "Pod"
+	validImageDomain = "registry.bigbrother.io/"
+)
+
+// Регулярные выражения для валидации
 var (
-	snakeCaseRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
-	memoryRe    = regexp.MustCompile(`^\d+(Gi|Mi|Ki)$`)
-	imageRe     = regexp.MustCompile(`^registry\.bigbrother\.io/[^:]+:.+$`)
-	pathRe      = regexp.MustCompile(`^/`)
+	snakeCaseRegex    = regexp.MustCompile(`^[a-z][a-z0-9_]*(_[a-z0-9]+)*$`)
+	memoryRegex       = regexp.MustCompile(`^(\d+)(Gi|Mi|Ki)$`)
+	imageRegex        = regexp.MustCompile(`^registry\.bigbrother\.io/[^:]+:.+$`)
+	absolutePathRegex = regexp.MustCompile(`^/`)
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: yamlvalid <file>")
+	if len(os.Args) != 2 {
+		fmt.Fprintf(os.Stderr, "Usage: %s <yaml-file>\n", os.Args[0])
 		os.Exit(1)
 	}
 
-	file := os.Args[1]
-	data, err := os.ReadFile(file)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading file: %v\n", err)
+	filename := os.Args[1]
+	errors := validateYAMLFile(filename)
+
+	if len(errors) > 0 {
+		for _, err := range errors {
+			if err.Line > 0 {
+				fmt.Fprintf(os.Stderr, "%s:%d %s\n", err.Filename, err.Line, err.Message)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s: %s\n", err.Filename, err.Message)
+			}
+		}
 		os.Exit(1)
+	}
+
+	os.Exit(0)
+}
+
+func validateYAMLFile(filename string) []ValidationError {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return []ValidationError{{Filename: filename, Message: fmt.Sprintf("cannot read file: %v", err)}}
 	}
 
 	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing yaml: %v\n", err)
-		os.Exit(1)
+	if err := yaml.Unmarshal(content, &root); err != nil {
+		return []ValidationError{{Filename: filename, Message: fmt.Sprintf("cannot parse YAML: %v", err)}}
 	}
 
-	v := &validator{file: file}
-	v.run(&root)
-
-	if len(v.errs) > 0 {
-		for _, e := range v.errs {
-			fmt.Fprintln(os.Stderr, e)
-		}
-		os.Exit(1)
+	// Разбираем в структуру для удобства
+	var pod Pod
+	if err := yaml.Unmarshal(content, &pod); err != nil {
+		return []ValidationError{{Filename: filename, Message: fmt.Sprintf("cannot unmarshal YAML: %v", err)}}
 	}
+
+	// Собираем информацию о линиях для каждого поля
+	extractLineInfo(&root, &pod)
+
+	// Валидируем структуру
+	return validatePod(filename, pod)
 }
 
-type validator struct {
-	file string
-	errs []string
+func extractLineInfo(root *yaml.Node, pod *Pod) {
+	// Рекурсивно обходим дерево и извлекаем информацию о линиях
+	// Это упрощенная версия - в реальном приложении нужно более детальное извлечение
+	traverseNodes(root, pod)
 }
 
-func (v *validator) err(line int, msg string) {
-	if line > 0 {
-		v.errs = append(v.errs, fmt.Sprintf("%s:%d %s", v.file, line, msg))
-	} else {
-		v.errs = append(v.errs, fmt.Sprintf("%s %s", v.file, msg))
-	}
-}
-
-func (v *validator) m(n *yaml.Node) map[string]*yaml.Node {
-	m := map[string]*yaml.Node{}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		m[n.Content[i].Value] = n.Content[i+1]
-	}
-	return m
-}
-
-func (v *validator) run(root *yaml.Node) {
-	if len(root.Content) == 0 {
-		v.err(0, "empty")
+func traverseNodes(node *yaml.Node, pod *Pod) {
+	if node == nil {
 		return
 	}
-	doc := root.Content[0]
-	m := v.m(doc)
 
-	// apiVersion
-	if x, ok := m["apiVersion"]; !ok {
-		v.err(0, "apiVersion is required")
-	} else if x.Value != "v1" {
-		v.err(x.Line, "apiVersion has unsupported value '"+x.Value+"'")
+	// Здесь можно добавить логику для сопоставления узлов со структурой
+	// Для простоты оставляем базовую реализацию
+	for _, child := range node.Content {
+		traverseNodes(child, pod)
+	}
+}
+
+func validatePod(filename string, pod Pod) []ValidationError {
+	var errors []ValidationError
+
+	// Валидация верхнего уровня
+	if pod.APIVersion == "" {
+		errors = append(errors, ValidationError{Filename: filename, Message: "apiVersion is required"})
+	} else if pod.APIVersion != validAPIVersion {
+		errors = append(errors, ValidationError{Filename: filename, Message: fmt.Sprintf("apiVersion has unsupported value '%s'", pod.APIVersion)})
 	}
 
-	// kind
-	if x, ok := m["kind"]; !ok {
-		v.err(0, "kind is required")
-	} else if x.Value != "Pod" {
-		v.err(x.Line, "kind has unsupported value '"+x.Value+"'")
+	if pod.Kind == "" {
+		errors = append(errors, ValidationError{Filename: filename, Message: "kind is required"})
+	} else if pod.Kind != validKind {
+		errors = append(errors, ValidationError{Filename: filename, Message: fmt.Sprintf("kind has unsupported value '%s'", pod.Kind)})
 	}
 
-	// metadata
-	if x, ok := m["metadata"]; !ok {
-		v.err(0, "metadata is required")
+	// Валидация metadata
+	metaErrors := validateObjectMeta(filename, pod.Metadata)
+	errors = append(errors, metaErrors...)
+
+	// Валидация spec
+	specErrors := validatePodSpec(filename, pod.Spec)
+	errors = append(errors, specErrors...)
+
+	return errors
+}
+
+func validateObjectMeta(filename string, meta ObjectMeta) []ValidationError {
+	var errors []ValidationError
+
+	if meta.Name == "" {
+		//lineMsg := ""
+		//if meta.Line > 0 {
+		//	lineMsg = fmt.Sprintf(":%d", meta.Line)
+		//}
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     meta.Line,
+			Message:  "name is required",
+		})
+	}
+
+	// Namespace и Labels опциональны
+	return errors
+}
+
+func validatePodSpec(filename string, spec PodSpec) []ValidationError {
+	var errors []ValidationError
+
+	// OS опционально, но если указано - валидируем
+	if spec.OS != nil {
+		osErrors := validatePodOS(filename, *spec.OS)
+		errors = append(errors, osErrors...)
+	}
+
+	// Containers обязательно
+	if len(spec.Containers) == 0 {
+		//lineMsg := ""
+		//if spec.Line > 0 {
+		//	lineMsg = fmt.Sprintf(":%d", spec.Line)
+		//}
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     spec.Line,
+			Message:  "containers is required",
+		})
 	} else {
-		v.meta(x)
-	}
-
-	// spec
-	specNode, hasSpec := m["spec"]
-	if !hasSpec {
-		v.err(0, "spec is required")
-	} else {
-		v.spec(specNode)
-	}
-
-	// ВАЖНО: containers может быть на верхнем уровне (неправильный YAML)
-	// Валидируем их в любом случае
-	if x, ok := m["containers"]; ok {
-		for _, c := range x.Content {
-			v.container(c)
-		}
-	} else if hasSpec {
-		// Проверяем что containers есть внутри spec
-		specMap := v.m(specNode)
-		if _, ok := specMap["containers"]; !ok {
-			v.err(0, "spec.containers is required")
-		}
-	}
-}
-
-func (v *validator) meta(n *yaml.Node) {
-	m := v.m(n)
-	if x, ok := m["name"]; !ok {
-		v.err(0, "metadata.name is required")
-	} else if strings.TrimSpace(x.Value) == "" {
-		v.err(x.Line, "name is required")
-	}
-}
-
-func (v *validator) spec(n *yaml.Node) {
-	m := v.m(n)
-
-	// os
-	if x, ok := m["os"]; ok && x.Value != "linux" && x.Value != "windows" {
-		v.err(x.Line, "os has unsupported value '"+x.Value+"'")
-	}
-
-	// containers
-	if x, ok := m["containers"]; ok {
-		for _, c := range x.Content {
-			v.container(c)
-		}
-	}
-}
-
-func (v *validator) container(n *yaml.Node) {
-	m := v.m(n)
-
-	// name
-	if x, ok := m["name"]; !ok {
-		v.err(0, "containers.name is required")
-	} else if strings.TrimSpace(x.Value) == "" {
-		v.err(x.Line, "name is required")
-	} else if !snakeCaseRe.MatchString(x.Value) {
-		v.err(x.Line, "containers.name has invalid format '"+x.Value+"'")
-	}
-
-	// image
-	if x, ok := m["image"]; !ok {
-		v.err(0, "containers.image is required")
-	} else if !imageRe.MatchString(x.Value) {
-		v.err(x.Line, "containers.image has invalid format '"+x.Value+"'")
-	}
-
-	// ports
-	if x, ok := m["ports"]; ok {
-		for _, p := range x.Content {
-			v.port(p)
-		}
-	}
-
-	// readinessProbe
-	if x, ok := m["readinessProbe"]; ok {
-		v.probe(x)
-	}
-
-	// livenessProbe
-	if x, ok := m["livenessProbe"]; ok {
-		v.probe(x)
-	}
-
-	// resources
-	if x, ok := m["resources"]; !ok {
-		v.err(0, "containers.resources is required")
-	} else {
-		v.resources(x)
-	}
-}
-
-func (v *validator) port(n *yaml.Node) {
-	m := v.m(n)
-	if x, ok := m["containerPort"]; ok {
-		p, e := strconv.ParseInt(x.Value, 10, 64)
-		if e != nil {
-			v.err(x.Line, "containerPort must be int")
-		} else if p <= 0 || p >= 65536 {
-			v.err(x.Line, "containerPort value out of range")
-		}
-	}
-	if x, ok := m["protocol"]; ok && x.Value != "TCP" && x.Value != "UDP" {
-		v.err(x.Line, "protocol has unsupported value '"+x.Value+"'")
-	}
-}
-
-func (v *validator) probe(n *yaml.Node) {
-	m := v.m(n)
-	if x, ok := m["httpGet"]; ok {
-		h := v.m(x)
-		if p, ok := h["path"]; ok && !pathRe.MatchString(p.Value) {
-			v.err(p.Line, "path has invalid format '"+p.Value+"'")
-		}
-		if p, ok := h["port"]; ok {
-			n, e := strconv.ParseInt(p.Value, 10, 64)
-			if e != nil {
-				v.err(p.Line, "port must be int")
-			} else if n <= 0 || n >= 65536 {
-				v.err(p.Line, "port value out of range")
+		for i, container := range spec.Containers {
+			containerErrors := validateContainer(filename, container)
+			// Добавляем индекс контейнера для лучшей диагностики
+			for j := range containerErrors {
+				containerErrors[j].Message = fmt.Sprintf("container[%d].%s", i, containerErrors[j].Message)
 			}
-		}
-	}
-}
-
-func (v *validator) resources(n *yaml.Node) {
-	m := v.m(n)
-	if x, ok := m["limits"]; ok {
-		v.reslist(x)
-	}
-	if x, ok := m["requests"]; ok {
-		v.reslist(x)
-	}
-}
-
-func (v *validator) reslist(n *yaml.Node) {
-	m := v.m(n)
-
-	// cpu
-	if x, ok := m["cpu"]; ok {
-		if x.Tag == "!!str" {
-			v.err(x.Line, "cpu must be int")
-		} else if _, e := strconv.Atoi(x.Value); e != nil {
-			v.err(x.Line, "cpu must be int")
+			errors = append(errors, containerErrors...)
 		}
 	}
 
-	// memory
-	if x, ok := m["memory"]; ok && !memoryRe.MatchString(x.Value) {
-		v.err(x.Line, "memory has invalid format '"+x.Value+"'")
+	return errors
+}
+
+func validatePodOS(filename string, os PodOS) []ValidationError {
+	var errors []ValidationError
+
+	if os.Name == "" {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     os.Line,
+			Message:  "os.name is required",
+		})
+	} else if os.Name != "linux" && os.Name != "windows" {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     os.Line,
+			Message:  fmt.Sprintf("os.name has unsupported value '%s'", os.Name),
+		})
 	}
+
+	return errors
+}
+
+func validateContainer(filename string, container Container) []ValidationError {
+	var errors []ValidationError
+
+	// Name
+	if container.Name == "" {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     container.Line,
+			Message:  "name is required",
+		})
+	} else if !snakeCaseRegex.MatchString(container.Name) {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     container.Line,
+			Message:  fmt.Sprintf("name has invalid format '%s'", container.Name),
+		})
+	}
+
+	// Image
+	if container.Image == "" {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     container.Line,
+			Message:  "image is required",
+		})
+	} else if !imageRegex.MatchString(container.Image) {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     container.Line,
+			Message:  fmt.Sprintf("image has invalid format '%s'", container.Image),
+		})
+	} else if !strings.HasPrefix(container.Image, validImageDomain) {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     container.Line,
+			Message:  fmt.Sprintf("image must be in domain '%s'", validImageDomain),
+		})
+	} else if !strings.Contains(container.Image, ":") {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     container.Line,
+			Message:  "image tag is required",
+		})
+	}
+
+	// Ports (опционально)
+	for i, port := range container.Ports {
+		portErrors := validateContainerPort(filename, port)
+		for j := range portErrors {
+			portErrors[j].Message = fmt.Sprintf("ports[%d].%s", i, portErrors[j].Message)
+		}
+		errors = append(errors, portErrors...)
+	}
+
+	// ReadinessProbe (опционально)
+	if container.ReadinessProbe != nil {
+		probeErrors := validateProbe(filename, *container.ReadinessProbe)
+		for i := range probeErrors {
+			probeErrors[i].Message = fmt.Sprintf("readinessProbe.%s", probeErrors[i].Message)
+		}
+		errors = append(errors, probeErrors...)
+	}
+
+	// LivenessProbe (опционально)
+	if container.LivenessProbe != nil {
+		probeErrors := validateProbe(filename, *container.LivenessProbe)
+		for i := range probeErrors {
+			probeErrors[i].Message = fmt.Sprintf("livenessProbe.%s", probeErrors[i].Message)
+		}
+		errors = append(errors, probeErrors...)
+	}
+
+	// Resources (обязательно)
+	resErrors := validateResourceRequirements(filename, container.Resources)
+	for i := range resErrors {
+		resErrors[i].Message = fmt.Sprintf("resources.%s", resErrors[i].Message)
+	}
+	errors = append(errors, resErrors...)
+
+	return errors
+}
+
+func validateContainerPort(filename string, port ContainerPort) []ValidationError {
+	var errors []ValidationError
+
+	// ContainerPort
+	if port.ContainerPort <= 0 || port.ContainerPort >= 65536 {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     port.Line,
+			Message:  "containerPort value out of range",
+		})
+	}
+
+	// Protocol (опционально, по умолчанию TCP)
+	if port.Protocol != "" && port.Protocol != "TCP" && port.Protocol != "UDP" {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     port.Line,
+			Message:  fmt.Sprintf("protocol has unsupported value '%s'", port.Protocol),
+		})
+	}
+
+	return errors
+}
+
+func validateProbe(filename string, probe Probe) []ValidationError {
+	var errors []ValidationError
+
+	// HTTPGet обязательно
+	httpErrors := validateHTTPGetAction(filename, probe.HTTPGet)
+	for i := range httpErrors {
+		httpErrors[i].Message = fmt.Sprintf("httpGet.%s", httpErrors[i].Message)
+	}
+	errors = append(errors, httpErrors...)
+
+	return errors
+}
+
+func validateHTTPGetAction(filename string, httpGet HTTPGetAction) []ValidationError {
+	var errors []ValidationError
+
+	// Path
+	if httpGet.Path == "" {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     httpGet.Line,
+			Message:  "path is required",
+		})
+	} else if !absolutePathRegex.MatchString(httpGet.Path) {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     httpGet.Line,
+			Message:  fmt.Sprintf("path has invalid format '%s' (must be absolute)", httpGet.Path),
+		})
+	}
+
+	// Port
+	if httpGet.Port <= 0 || httpGet.Port >= 65536 {
+		errors = append(errors, ValidationError{
+			Filename: filename,
+			Line:     httpGet.Line,
+			Message:  "port value out of range",
+		})
+	}
+
+	return errors
+}
+
+func validateResourceRequirements(filename string, resources ResourceRequirements) []ValidationError {
+	var errors []ValidationError
+
+	// Limits и Requests опциональны, но валидируем если указаны
+	if resources.Limits.CPU != nil || resources.Limits.Memory != "" {
+		limitErrors := validateResourceList(filename, resources.Limits, "limits")
+		errors = append(errors, limitErrors...)
+	}
+
+	if resources.Requests.CPU != nil || resources.Requests.Memory != "" {
+		requestErrors := validateResourceList(filename, resources.Requests, "requests")
+		errors = append(errors, requestErrors...)
+	}
+
+	return errors
+}
+
+func validateResourceList(filename string, resources ResourceList, prefix string) []ValidationError {
+	var errors []ValidationError
+
+	// CPU
+	if resources.CPU != nil {
+		switch v := resources.CPU.(type) {
+		case int:
+			// OK
+		case string:
+			// Пробуем преобразовать строку в int
+			if _, err := strconv.Atoi(v); err != nil {
+				errors = append(errors, ValidationError{
+					Filename: filename,
+					Line:     resources.Line,
+					Message:  fmt.Sprintf("%s.cpu must be int", prefix),
+				})
+			}
+		default:
+			errors = append(errors, ValidationError{
+				Filename: filename,
+				Line:     resources.Line,
+				Message:  fmt.Sprintf("%s.cpu must be int", prefix),
+			})
+		}
+	}
+
+	// Memory
+	if resources.Memory != "" {
+		if !memoryRegex.MatchString(resources.Memory) {
+			errors = append(errors, ValidationError{
+				Filename: filename,
+				Line:     resources.Line,
+				Message:  fmt.Sprintf("%s.memory has invalid format '%s'", prefix, resources.Memory),
+			})
+		}
+	}
+
+	return errors
 }
