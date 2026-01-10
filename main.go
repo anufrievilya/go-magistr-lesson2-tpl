@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -143,6 +144,8 @@ func (v *Validator) validateMetadata(node *yaml.Node) {
 		v.addError(0, "metadata.name is required")
 	} else if name.Kind != yaml.ScalarNode {
 		v.addError(name.Line, "metadata.name must be string")
+	} else if strings.TrimSpace(name.Value) == "" {
+		v.addError(name.Line, "metadata.name is required")
 	}
 
 	// namespace (optional)
@@ -378,9 +381,14 @@ func (v *Validator) validateResourceList(node *yaml.Node, resourceType string) {
 		if cpu.Kind != yaml.ScalarNode {
 			v.addError(cpu.Line, "containers.resources."+resourceType+".cpu must be int")
 		} else {
-			_, err := strconv.Atoi(cpu.Value)
-			if err != nil {
+			// Проверяем что это число БЕЗ кавычек (tag должен быть !!int)
+			if cpu.Tag != "!!int" {
 				v.addError(cpu.Line, "containers.resources."+resourceType+".cpu must be int")
+			} else {
+				_, err := strconv.Atoi(cpu.Value)
+				if err != nil {
+					v.addError(cpu.Line, "containers.resources."+resourceType+".cpu must be int")
+				}
 			}
 		}
 	}
