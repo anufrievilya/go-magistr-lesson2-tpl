@@ -135,7 +135,7 @@ func (v *validator) spec(n *yaml.Node) {
 func (v *validator) container(n *yaml.Node) {
 	m := v.m(n)
 
-	// name
+	// name  this works
 	if x, ok := m["name"]; !ok {
 		v.err(0, "containers.name is required")
 	} else if strings.TrimSpace(x.Value) == "" {
