@@ -280,13 +280,14 @@ func (v *Validator) validatePorts(node *yaml.Node) {
 			v.addError(0, "containers.ports.containerPort is required")
 		} else {
 			if containerPort.Kind != yaml.ScalarNode {
-				v.addError(containerPort.Line, "containers.ports.containerPort must be int")
+				v.addError(containerPort.Line, "containerPort must be int")
 			} else {
-				portNum, err := strconv.Atoi(containerPort.Value)
+				// Используем ParseInt вместо Atoi
+				portNum, err := strconv.ParseInt(containerPort.Value, 10, 64)
 				if err != nil {
-					v.addError(containerPort.Line, "containers.ports.containerPort must be int")
+					v.addError(containerPort.Line, "containerPort must be int")
 				} else if portNum <= 0 || portNum >= 65536 {
-					v.addError(containerPort.Line, "containers.ports.containerPort value out of range")
+					v.addError(containerPort.Line, "containerPort value out of range")
 				}
 			}
 		}
