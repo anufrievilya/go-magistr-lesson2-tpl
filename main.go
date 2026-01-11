@@ -297,7 +297,7 @@ func (v *Validator) validateHTTPGet(node *yaml.Node, prefix string) {
 		}
 	}
 
-	// port required and must be int in range
+	// port required and must be int in range еще раз
 	if port, ok := fields["port"]; !ok {
 		v.addError(0, prefix+".port is required")
 	} else {
