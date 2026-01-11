@@ -322,7 +322,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error reading file: %v\n", err)
 		os.Exit(1)
 	}
-
+	// Разбор YAML
 	var root yaml.Node
 	if err := yaml.Unmarshal(content, &root); err != nil {
 		fmt.Fprintf(os.Stderr, "error parsing YAML: %v\n", err)
