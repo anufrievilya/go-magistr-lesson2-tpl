@@ -59,6 +59,12 @@ func (v *Validator) hasErrors() bool {
 
 // printErrors - вывод всех ошибок в stderr
 func (v *Validator) printErrors() {
+	// Добавьте проверку
+	if len(v.errors) == 0 {
+		fmt.Fprintln(os.Stderr, "DEBUG: no errors to print")
+		return
+	}
+
 	for _, err := range v.errors {
 		fmt.Fprintln(os.Stderr, err)
 	}
@@ -340,41 +346,44 @@ func (v *Validator) validateResourceList(node *yaml.Node) {
 
 // main - главная функция программы
 func main() {
-	// Проверка аргументов командной строки
+	// Гарантированный flush stderr при выходе
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Fprintf(os.Stderr, "panic: %v\n", err)
+			os.Stderr.Sync()
+			os.Exit(1)
+		}
+		os.Stderr.Sync()
+	}()
+
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: yamlvalidator <yaml-file>")
 		os.Exit(1)
 	}
 
-	// Получаем имя файла из аргументов
 	filename := os.Args[1]
 
-	// Чтение содержимого файла
 	content, err := os.ReadFile(filename)
 	if err != nil {
-		// Не удалось прочитать файл (файл не существует, нет прав и т.д.)
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error reading file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Парсинг YAML в структуру Node
 	var root yaml.Node
 	if err := yaml.Unmarshal(content, &root); err != nil {
-		// Ошибка парсинга YAML (невалидный синтаксис)
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error parsing YAML: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Создание валидатора и запуск проверки
 	validator := NewValidator(filename)
 	validator.Validate(&root)
 
-	// Если есть ошибки валидации - выводим их в stderr и завершаем с кодом 1
 	if validator.hasErrors() {
 		validator.printErrors()
+		// Явный flush перед exit
+		os.Stderr.Sync()
 		os.Exit(1)
 	}
 
-	// Если ошибок нет - завершаем с кодом 0 (успешная валидация)
 	os.Exit(0)
 }
