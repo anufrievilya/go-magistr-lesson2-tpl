@@ -18,7 +18,7 @@ var (
 	memoryRegex = regexp.MustCompile(`^\d+(Gi|Mi|Ki)$`)
 
 	// image must be in registry.bigbrother.io and contain a tag
-	imageRegex = regexp.MustCompile(`^registry\.bigbrother\.io/.+:.+$`)
+	imageRegex = regexp.MustCompile(`^registry\.bigbrother\.io/[^:]+:.+$`)
 
 	// absolute path starts with /
 	absolutePathRegex = regexp.MustCompile(`^/`)
@@ -30,7 +30,6 @@ type Validator struct {
 	errors   []string
 }
 
-// NewValidator creates a validator bound to filename.
 func NewValidator(filename string) *Validator {
 	return &Validator{
 		filename: filename,
@@ -48,9 +47,7 @@ func (v *Validator) addError(line int, message string) {
 	}
 }
 
-func (v *Validator) hasErrors() bool {
-	return len(v.errors) > 0
-}
+func (v *Validator) hasErrors() bool { return len(v.errors) > 0 }
 
 func (v *Validator) printErrors() {
 	for _, e := range v.errors {
@@ -65,37 +62,39 @@ func (v *Validator) parseMap(node *yaml.Node) map[string]*yaml.Node {
 	if node == nil {
 		return m
 	}
+	// If it's a document node, take its first child
 	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
 		node = node.Content[0]
 	}
-	if node.Kind != yaml.MappingNode {
+	if node == nil || node.Kind != yaml.MappingNode {
 		return m
 	}
 	for i := 0; i < len(node.Content)-1; i += 2 {
-		key := node.Content[i]
+		k := node.Content[i]
 		val := node.Content[i+1]
-		if key != nil && val != nil {
-			m[key.Value] = val
+		if k != nil && val != nil {
+			m[k.Value] = val
 		}
 	}
 	return m
 }
 
-// Validate is the entry point for validating the document.
+// Validate walks all documents in root and validates each as a Pod manifest.
 func (v *Validator) Validate(root *yaml.Node) {
 	if root == nil || len(root.Content) == 0 {
 		v.addError(0, "empty YAML file")
 		return
 	}
 
-	doc := root.Content[0]
-	if doc == nil {
-		v.addError(0, "invalid document")
-		return
+	// Validate each document (some YAML files may contain multiple documents)
+	for _, doc := range root.Content {
+		if doc == nil {
+			v.addError(0, "invalid document")
+			continue
+		}
+		fields := v.parseMap(doc)
+		v.validateTopLevel(fields)
 	}
-
-	fields := v.parseMap(doc)
-	v.validateTopLevel(fields)
 }
 
 func (v *Validator) validateTopLevel(fields map[string]*yaml.Node) {
@@ -143,8 +142,7 @@ func (v *Validator) validateMetadata(node *yaml.Node) {
 			v.addError(name.Line, "name is required")
 		}
 	}
-
-	// namespace optional, labels optional - no special checks beyond structure
+	// namespace and labels are optional; no further validation required
 }
 
 func (v *Validator) validateSpec(node *yaml.Node) {
@@ -164,8 +162,9 @@ func (v *Validator) validateSpec(node *yaml.Node) {
 		return
 	}
 	if containersNode.Kind != yaml.SequenceNode {
-		// Not a sequence -> treat as required missing/invalid
-		v.addError(containersNode.Line, "spec.containers has invalid format")
+		// Not a sequence -> mark invalid format (use line if available)
+		line := containersNode.Line
+		v.addError(line, "spec.containers has invalid format")
 		return
 	}
 
@@ -175,16 +174,17 @@ func (v *Validator) validateSpec(node *yaml.Node) {
 		if item == nil {
 			continue
 		}
-		// each item should be mapping
+		// item should be a mapping node describing a container
 		if item.Kind != yaml.MappingNode {
-			// can't extract fields, skip
+			// skip but record generic error
+			v.addError(item.Line, "containers has invalid format")
 			continue
 		}
 		v.validateContainer(item)
 
 		// check uniqueness
-		fields := v.parseMap(item)
-		if nameNode, ok := fields["name"]; ok {
+		cfields := v.parseMap(item)
+		if nameNode, ok := cfields["name"]; ok {
 			if nameNode.Value != "" {
 				if names[nameNode.Value] {
 					v.addError(nameNode.Line, "containers.name must be unique")
@@ -210,7 +210,7 @@ func (v *Validator) validateContainer(node *yaml.Node) {
 		}
 	}
 
-	// image required, must be registry.bigbrother.io/<...>:<tag>
+	// image required
 	if image, ok := fields["image"]; !ok {
 		v.addError(0, "containers.image is required")
 	} else {
@@ -219,7 +219,7 @@ func (v *Validator) validateContainer(node *yaml.Node) {
 		}
 	}
 
-	// ports optional (sequence)
+	// ports optional
 	if ports, ok := fields["ports"]; ok {
 		if ports.Kind != yaml.SequenceNode {
 			v.addError(ports.Line, "ports has invalid format")
@@ -227,17 +227,19 @@ func (v *Validator) validateContainer(node *yaml.Node) {
 			for _, p := range ports.Content {
 				if p != nil && p.Kind == yaml.MappingNode {
 					v.validatePort(p)
+				} else if p != nil {
+					v.addError(p.Line, "ports has invalid format")
 				}
 			}
 		}
 	}
 
-	// readinessProbe optional but if present must contain httpGet
+	// readinessProbe optional
 	if probe, ok := fields["readinessProbe"]; ok {
 		v.validateProbe(probe, "readinessProbe")
 	}
 
-	// livenessProbe optional but if present must contain httpGet
+	// livenessProbe optional
 	if probe, ok := fields["livenessProbe"]; ok {
 		v.validateProbe(probe, "livenessProbe")
 	}
@@ -297,7 +299,7 @@ func (v *Validator) validateHTTPGet(node *yaml.Node, prefix string) {
 		}
 	}
 
-	// port required and must be int in range еще раз
+	// port required and must be int in range
 	if port, ok := fields["port"]; !ok {
 		v.addError(0, prefix+".port is required")
 	} else {
@@ -329,7 +331,6 @@ func (v *Validator) validateResourceList(node *yaml.Node) {
 
 	// cpu must be integer (not string)
 	if cpu, ok := fields["cpu"]; ok {
-		// If YAML parser recognized it as string tag, that's an error per spec.
 		if cpu.Tag == "!!str" {
 			v.addError(cpu.Line, "cpu must be int")
 		} else {
