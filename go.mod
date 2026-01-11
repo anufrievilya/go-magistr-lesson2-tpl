@@ -1,4 +1,4 @@
-module yamlvalid
+module yamlvalidator
 
 go 1.22.12
 
